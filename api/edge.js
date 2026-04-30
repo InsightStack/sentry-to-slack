@@ -80,12 +80,20 @@ try{
 }
 }
 export default async (req) => {
+  const body = await req.json();
   
-  const body = await req.json()
-  console.log(typeof body)
-  const {project,culprit, event:{level, logentry:{formatted}, user:{email}, environment,metadata :{title }}} = body;
+  // Safely extract properties with fallbacks
+  const project = body?.project || 'Unknown Project';
+  const culprit = body?.culprit || 'Unknown Culprit';
+  
+  const event = body?.event || {};
+  const level = event?.level || 'info';
+  const formatted = event?.logentry?.formatted || event?.message || 'No message provided';
+  const email = event?.user?.email || 'Unknown User';
+  const environment = event?.environment || 'production';
+  const title = event?.metadata?.title || 'Sentry Alert';
 
-  await sendMessage(process.env.CHANNEL_ID, {level, formatted, environment, email,title, culprit, project});
+  await sendMessage(process.env.CHANNEL_ID, {level, formatted, environment, email, title, culprit, project});
   
-  return new Response(`Hello from Edge.js! ${body}`)
+  return new Response(`Event processed successfully`);
 }
