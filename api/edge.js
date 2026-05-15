@@ -126,9 +126,54 @@ export const buildSlackMessage = (channel, payload) => {
   return { channel, text: fallback, attachments: [{ color, blocks, fallback }] };
 };
 
-const sendMessage = async (channel, payload) => {
-  const body = buildSlackMessage(channel, payload);
+// Section text in Block Kit caps at 3000 chars; leave room for the surrounding
+// triple-backtick fence used to render JSON dumps.
+const DEBUG_TEXT_MAX = 2800;
 
+const truncate = (s, max) => {
+  if (typeof s !== 'string') s = String(s);
+  return s.length > max ? `${s.slice(0, max - 3)}...` : s;
+};
+
+const safeStringify = (value) => {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (e) {
+    return `[unstringifiable payload: ${e?.message || e}]`;
+  }
+};
+
+// A minimal yellow-bar message used whenever the handler can't produce a
+// proper Sentry alert: unrecognized payload shapes, JSON parse failures, or
+// uncaught exceptions in the pretty-render path. The goal is that *something*
+// always lands in Slack so the user notices, rather than the failure hiding
+// in Vercel logs.
+export const buildDebugMessage = (channel, summary, body) => {
+  const dump = truncate(typeof body === 'string' ? body : safeStringify(body), DEBUG_TEXT_MAX);
+  return {
+    channel,
+    text: summary,
+    attachments: [{
+      color: '#ECB22E',
+      fallback: summary,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `:warning: *${summary}*` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `\`\`\`${dump}\`\`\`` } },
+      ],
+    }],
+  };
+};
+
+// Returns true if the payload looks like one of the issue/event shapes we
+// know how to pretty-render. Comment and metric_alert webhooks intentionally
+// return false so they get surfaced via buildDebugMessage rather than as a
+// blank "Sentry Alert" with no body.
+export const isRecognizedIssueOrEvent = (body) => {
+  const d = body?.data;
+  return !!(d && (d.issue || d.event));
+};
+
+const postToSlack = async (payload) => {
   try {
     const response = await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
@@ -136,20 +181,16 @@ const sendMessage = async (channel, payload) => {
         'Content-Type': 'application/json; charset=utf-8',
         'Authorization': `Bearer ${process.env.SLACK_ACCESS_TOKEN}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
     });
-
     const data = await response.json();
-
     if (!data.ok) {
       console.error('Slack API Error:', data.error);
-    } else {
-      console.log('Successfully sent to Slack!');
     }
-
     return data;
   } catch (e) {
-    console.error('Network/Fetch error:', e);
+    console.error('Network/Fetch error posting to Slack:', e);
+    return { ok: false, error: String(e?.message || e) };
   }
 };
 
@@ -194,17 +235,65 @@ export default async (req) => {
     return new Response('Method Not Allowed. Send a POST request.', { status: 405 });
   }
 
+  const channel = process.env.CHANNEL_ID;
+
+  // Read the raw body first so we can include it in a Slack debug message
+  // if JSON parsing fails.
+  let rawText = '';
+  try {
+    rawText = await req.text();
+  } catch (err) {
+    console.error('Failed to read request body:', err);
+    return new Response('Bad Request: Could not read body', { status: 400 });
+  }
+
   let body;
   try {
-    body = await req.json();
+    body = JSON.parse(rawText);
     console.log('RAW SENTRY PAYLOAD:', JSON.stringify(body, null, 2));
   } catch (err) {
-    console.error('Failed to parse JSON body:', err);
+    await postToSlack(buildDebugMessage(
+      channel,
+      'Sentry webhook had invalid JSON',
+      { error: String(err?.message || err), body: truncate(rawText, 1500) },
+    ));
     return new Response('Bad Request: Invalid JSON', { status: 400 });
   }
 
-  const payload = parsePayload(body);
-  await sendMessage(process.env.CHANNEL_ID, payload);
+  try {
+    if (!isRecognizedIssueOrEvent(body)) {
+      // Comment webhooks, metric_alert webhooks, brand-new payload shapes:
+      // surface them in Slack instead of dropping them on the floor.
+      await postToSlack(buildDebugMessage(
+        channel,
+        'Received Sentry webhook in an unrecognized format',
+        body,
+      ));
+      return new Response('Webhook Processed (unrecognized shape)', { status: 200 });
+    }
+
+    const payload = parsePayload(body);
+    const message = buildSlackMessage(channel, payload);
+    const result = await postToSlack(message);
+
+    // If Slack rejected the formatted message (e.g. invalid_blocks because a
+    // future Sentry change produced a value we don't render correctly), fall
+    // back to a raw debug dump so the failure surfaces.
+    if (result && result.ok === false) {
+      await postToSlack(buildDebugMessage(
+        channel,
+        `Slack rejected the formatted Sentry alert (${result.error})`,
+        body,
+      ));
+    }
+  } catch (err) {
+    console.error('Handler error:', err);
+    await postToSlack(buildDebugMessage(
+      channel,
+      `Sentry webhook handler error: ${err?.message || err}`,
+      body,
+    ));
+  }
 
   return new Response('Webhook Processed Successfully', { status: 200 });
 };

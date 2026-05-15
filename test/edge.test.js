@@ -1,7 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parsePayload, buildBlocks, buildSlackMessage, pickColor } from '../api/edge.js';
+import {
+  parsePayload,
+  buildBlocks,
+  buildSlackMessage,
+  buildDebugMessage,
+  isRecognizedIssueOrEvent,
+  pickColor,
+} from '../api/edge.js';
 import {
   SENTRY_ISSUE_ACTIONS,
   SENTRY_LEVELS,
@@ -255,6 +262,66 @@ test('pickColor returns a valid Slack attachment color for every documented leve
     const color = pickColor(null, level);
     assert.match(color, /^(good|warning|danger|#[0-9a-fA-F]{6})$/);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Graceful fallback for unexpected payload shapes
+// ---------------------------------------------------------------------------
+
+test('isRecognizedIssueOrEvent: true for issue webhooks and legacy event-alert', () => {
+  assert.equal(isRecognizedIssueOrEvent(issueWebhook()), true);
+  assert.equal(isRecognizedIssueOrEvent(legacyEventAlert), true);
+});
+
+test('isRecognizedIssueOrEvent: false for comment / metric_alert / empty bodies', () => {
+  // Comments and metric_alerts are documented Sentry shapes, but they don't
+  // populate data.issue / data.event — the handler should route them to the
+  // debug-message path so the user still sees the content in Slack.
+  assert.equal(isRecognizedIssueOrEvent(commentWebhook), false);
+  assert.equal(isRecognizedIssueOrEvent(metricAlertWebhook), false);
+  assert.equal(isRecognizedIssueOrEvent({}), false);
+  assert.equal(isRecognizedIssueOrEvent(null), false);
+  assert.equal(isRecognizedIssueOrEvent({ data: {} }), false);
+});
+
+test('buildDebugMessage produces a schema-valid Slack message for a comment webhook', () => {
+  const msg = buildDebugMessage(CHANNEL, 'Unrecognized payload', commentWebhook);
+  assert.doesNotThrow(() => validateSlackMessage(msg));
+  // Yellow attachment so the message visibly stands out from normal alerts.
+  assert.equal(msg.attachments[0].color, '#ECB22E');
+  // The raw payload is included so the user can debug from Slack alone.
+  const codeBlock = msg.attachments[0].blocks[1].text.text;
+  assert.match(codeBlock, /^```/);
+  assert.match(codeBlock, /```$/);
+  assert.match(codeBlock, /"comment"/);
+  assert.match(codeBlock, /"adding a comment"/);
+});
+
+test('buildDebugMessage truncates very large payloads to stay under the 3000-char section limit', () => {
+  // Build a payload whose pretty-printed JSON is well over the Block Kit limit.
+  const huge = { values: Array.from({ length: 500 }, (_, i) => `value-${i}-${'x'.repeat(20)}`) };
+  const msg = buildDebugMessage(CHANNEL, 'Big one', huge);
+  assert.doesNotThrow(() => validateSlackMessage(msg));
+  const codeBlock = msg.attachments[0].blocks[1].text.text;
+  assert.ok(codeBlock.length <= 3000, `got ${codeBlock.length} chars, expected ≤ 3000`);
+  // Ends with `...```` indicating truncation occurred.
+  assert.match(codeBlock, /\.\.\.```$/);
+});
+
+test('buildDebugMessage handles non-object bodies (e.g. raw text from bad JSON)', () => {
+  const msg = buildDebugMessage(CHANNEL, 'Bad JSON', '<html>...</html>');
+  assert.doesNotThrow(() => validateSlackMessage(msg));
+  const codeBlock = msg.attachments[0].blocks[1].text.text;
+  assert.match(codeBlock, /<html>/);
+});
+
+test('buildDebugMessage tolerates payloads with circular references', () => {
+  const circ = { a: 1 };
+  circ.self = circ;
+  // JSON.stringify on this throws; safeStringify should catch it and produce
+  // a marker string. The Slack payload must still validate.
+  const msg = buildDebugMessage(CHANNEL, 'Circular', circ);
+  assert.doesNotThrow(() => validateSlackMessage(msg));
 });
 
 test('buildBlocks output by itself respects Block Kit limits', () => {
