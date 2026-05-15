@@ -39,7 +39,7 @@ const slackDate = (value, fallback) => {
   return `<!date^${unix}^{date_short_pretty} at {time}|${fallback}>`;
 };
 
-const buildBlocks = ({
+export const buildBlocks = ({
   action,
   level,
   title,
@@ -114,7 +114,7 @@ const buildBlocks = ({
   return blocks;
 };
 
-const pickColor = (action, level) => {
+export const pickColor = (action, level) => {
   if (action && ACTION_STYLE[action]?.color) return ACTION_STYLE[action].color;
   return LEVEL_COLOR[level] || LEVEL_COLOR.info;
 };
@@ -152,7 +152,7 @@ const sendMessage = async (channel, payload) => {
   }
 };
 
-const parsePayload = (body) => {
+export const parsePayload = (body) => {
   const payloadData = body?.data || {};
   // Sentry integration webhooks send the issue at data.issue; event-alert webhooks send data.event
   const source = payloadData.issue || payloadData.event || payloadData;

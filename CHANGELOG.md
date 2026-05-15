@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- Test suite using Node's built-in `node:test` runner (no extra dependencies). Covers `parsePayload`, `pickColor`, and `buildBlocks` against integration-webhook, event-alert, and empty-body fixtures. Run with `npm test`.
+- Switched the package to ESM (`"type": "module"`) so the test runner can `import` from `api/edge.js`. The unused legacy CommonJS file `sendMessage.js` was renamed to `sendMessage.cjs` to keep it parseable.
 - Action-aware rendering for Sentry issue webhooks. Resolved, reopened, assigned, archived, and ignored events now get their own emoji, verb, and color instead of always rendering as a red error alert.
 - Colored attachment bar on every message. Color is derived from the action (green for resolved, gray for archived/ignored, etc.) or from the issue level (fatal/error/warning/info/debug) when no action is set.
 - Surfaced extra issue metadata when present: `shortId` (as a context line alongside project/environment), `priority`, `substatus`, event `count`, affected `userCount`, and `firstSeen` / `lastSeen` rendered via Slack's `<!date^…>` formatter so timestamps land in the viewer's local timezone.
