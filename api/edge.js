@@ -290,6 +290,37 @@ export const FORMATTERS = {
 // alert — it would just be noise in the alert channel.
 export const SILENT_WEBHOOK_TYPES = new Set(['installation']);
 
+const hexToBytes = (hex) => {
+  if (typeof hex !== 'string' || hex.length === 0 || hex.length % 2 !== 0) return null;
+  if (!/^[0-9a-fA-F]+$/.test(hex)) return null;
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+};
+
+// Verifies the Sentry-Hook-Signature header against the raw request body
+// using the integration's client secret. Sentry documents this as a hex
+// HMAC-SHA256 of the body. crypto.subtle.verify performs the comparison in
+// constant time, so no manual timing-safe equality is needed.
+//
+// Returns true/false. Throws only on programmer error (e.g. importKey of an
+// invalid secret), never on attacker-controlled input.
+export const verifySentrySignature = async (rawBody, signatureHex, secret) => {
+  if (!secret || !signatureHex) return false;
+  const sigBytes = hexToBytes(signatureHex);
+  if (!sigBytes) return false;
+
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify'],
+  );
+  return crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(rawBody));
+};
+
 const postToSlack = async (payload) => {
   try {
     const response = await fetch('https://slack.com/api/chat.postMessage', {
@@ -362,6 +393,19 @@ export default async (req) => {
   } catch (err) {
     console.error('Failed to read request body:', err);
     return new Response('Bad Request: Could not read body', { status: 400 });
+  }
+
+  // Verify Sentry's HMAC signature over the raw body. Skipped entirely when
+  // SENTRY_CLIENT_SECRET is unset, so existing deployments keep working until
+  // the operator opts in by setting the env var.
+  const secret = process.env.SENTRY_CLIENT_SECRET;
+  if (secret) {
+    const signature = req.headers.get('sentry-hook-signature');
+    const ok = await verifySentrySignature(rawText, signature, secret);
+    if (!ok) {
+      console.warn('Rejected Sentry webhook: invalid or missing signature');
+      return new Response('Unauthorized: invalid signature', { status: 401 });
+    }
   }
 
   let body;
