@@ -164,14 +164,31 @@ export const buildDebugMessage = (channel, summary, body) => {
   };
 };
 
-// Returns true if the payload looks like one of the issue/event shapes we
-// know how to pretty-render. Comment and metric_alert webhooks intentionally
-// return false so they get surfaced via buildDebugMessage rather than as a
-// blank "Sentry Alert" with no body.
-export const isRecognizedIssueOrEvent = (body) => {
+// Webhook resource types we have a formatter for. Anything else (comment,
+// metric_alert, future shapes) flows through buildDebugMessage so the
+// content still lands in Slack, labeled with the detected type.
+export const RENDERABLE_WEBHOOK_TYPES = new Set(['issue', 'event_alert']);
+
+// Identifies the Sentry webhook resource type. Prefers the documented
+// `Sentry-Hook-Resource` header, falling back to payload-shape inference
+// for proxies, tests, or future versions that don't send it.
+// Header values per the Sentry docs: `issue`, `event_alert`, `comment`,
+// `metric_alert`, `installation`.
+export const detectWebhookType = (body, headers) => {
+  const header = headers?.get?.('sentry-hook-resource');
+  if (header) return header;
+
   const d = body?.data;
-  return !!(d && (d.issue || d.event));
+  if (!d) return 'unknown';
+  if (d.issue) return 'issue';
+  if (d.event) return 'event_alert';
+  if (d.metric_alert) return 'metric_alert';
+  if (typeof d.comment === 'string' || d.comment_id != null) return 'comment';
+  return 'unknown';
 };
+
+export const isRecognizedIssueOrEvent = (body, headers) =>
+  RENDERABLE_WEBHOOK_TYPES.has(detectWebhookType(body, headers));
 
 const postToSlack = async (payload) => {
   try {
@@ -261,15 +278,17 @@ export default async (req) => {
   }
 
   try {
-    if (!isRecognizedIssueOrEvent(body)) {
+    const hookType = detectWebhookType(body, req.headers);
+    if (!RENDERABLE_WEBHOOK_TYPES.has(hookType)) {
       // Comment webhooks, metric_alert webhooks, brand-new payload shapes:
-      // surface them in Slack instead of dropping them on the floor.
+      // surface them in Slack with the detected type so we know what
+      // formatter to add next.
       await postToSlack(buildDebugMessage(
         channel,
-        'Received Sentry webhook in an unrecognized format',
+        `Received Sentry "${hookType}" webhook — no formatter for this type yet`,
         body,
       ));
-      return new Response('Webhook Processed (unrecognized shape)', { status: 200 });
+      return new Response(`Webhook Processed (no formatter for "${hookType}")`, { status: 200 });
     }
 
     const payload = parsePayload(body);

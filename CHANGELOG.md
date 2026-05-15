@@ -3,10 +3,10 @@
 ## Unreleased
 
 ### Added
-- Graceful fallback for unexpected webhook shapes. If Sentry sends a payload that isn't `data.issue` or `data.event` (e.g. comment webhooks, metric-alert webhooks, or any future schema change), the handler now posts a yellow "unrecognized format" message to Slack with the raw JSON in a code block — so the content surfaces in the channel instead of disappearing into Vercel logs.
+- Graceful fallback for unexpected webhook shapes. If Sentry sends a payload that isn't `data.issue` or `data.event` (e.g. comment webhooks, metric-alert webhooks, or any future schema change), the handler now posts a yellow message to Slack naming the resource type — e.g. `Received Sentry "comment" webhook — no formatter for this type yet` — with the raw JSON in a code block. The type is read from the `Sentry-Hook-Resource` header when present, with payload-shape inference as a fallback.
 - Top-level try/catch around the handler. Invalid JSON, exceptions during rendering, and Slack rejections (`ok:false`) now all produce a fallback debug message in Slack rather than a silent 5xx.
-- `buildDebugMessage` and `isRecognizedIssueOrEvent` helpers exported and covered by the test suite.
-- Test suite using Node's built-in `node:test` runner (no extra dependencies). 44 tests run with `npm test`. Tests are anchored to documented specs rather than the implementation:
+- `detectWebhookType`, `buildDebugMessage`, `isRecognizedIssueOrEvent`, and `RENDERABLE_WEBHOOK_TYPES` exported and covered by the test suite.
+- Test suite using Node's built-in `node:test` runner (no extra dependencies). 47 tests run with `npm test`. Tests are anchored to documented specs rather than the implementation:
   - **Sentry payload fixtures** in `test/fixtures/sentry.js` mirror the example payloads and enum values from Sentry's integration-platform webhook docs (issues, comments, metric alerts). Each enum (`SENTRY_ISSUE_ACTIONS`, `SENTRY_LEVELS`, `SENTRY_PRIORITIES`, `SENTRY_SUBSTATUSES`) is iterated in tests so adding a new documented value reveals whichever branch is missing.
   - **Slack Block Kit validator** in `test/slack-schema.js` asserts the outgoing `chat.postMessage` payload against the published spec: block types, section text ≤ 3000 chars, section fields ≤ 10 items of ≤ 2000 chars, context elements ≤ 10, attachment color matches `good|warning|danger|#RRGGBB`, ≤ 50 blocks per message, and the `<!date^…>` token format. Every test runs its output through the validator.
 - Exported `buildSlackMessage(channel, payload)` from `api/edge.js` so tests can assert against the full outgoing payload (channel, text fallback, attachment color) rather than just the inner blocks.

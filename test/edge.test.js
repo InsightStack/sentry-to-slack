@@ -6,6 +6,7 @@ import {
   buildBlocks,
   buildSlackMessage,
   buildDebugMessage,
+  detectWebhookType,
   isRecognizedIssueOrEvent,
   pickColor,
 } from '../api/edge.js';
@@ -268,12 +269,38 @@ test('pickColor returns a valid Slack attachment color for every documented leve
 // Graceful fallback for unexpected payload shapes
 // ---------------------------------------------------------------------------
 
-test('isRecognizedIssueOrEvent: true for issue webhooks and legacy event-alert', () => {
-  assert.equal(isRecognizedIssueOrEvent(issueWebhook()), true);
-  assert.equal(isRecognizedIssueOrEvent(legacyEventAlert), true);
+test('detectWebhookType infers "issue" / "event_alert" / "comment" / "metric_alert" from payload shape', () => {
+  assert.equal(detectWebhookType(issueWebhook()), 'issue');
+  assert.equal(detectWebhookType(legacyEventAlert), 'event_alert');
+  assert.equal(detectWebhookType(commentWebhook), 'comment');
+  assert.equal(detectWebhookType(metricAlertWebhook), 'metric_alert');
 });
 
-test('isRecognizedIssueOrEvent: false for comment / metric_alert / empty bodies', () => {
+test('detectWebhookType returns "unknown" when neither header nor shape identifies the type', () => {
+  assert.equal(detectWebhookType({}), 'unknown');
+  assert.equal(detectWebhookType(null), 'unknown');
+  assert.equal(detectWebhookType({ data: {} }), 'unknown');
+});
+
+test('detectWebhookType prefers the documented Sentry-Hook-Resource header over shape inference', () => {
+  // Sentry's documented webhook headers include `Sentry-Hook-Resource`. When
+  // present we trust it, because Sentry may add new resource types whose
+  // payload shape we can't infer from.
+  const headers = new Headers({ 'Sentry-Hook-Resource': 'installation' });
+  assert.equal(detectWebhookType(issueWebhook(), headers), 'installation');
+});
+
+test('isRecognizedIssueOrEvent: true for issue and event_alert types', () => {
+  assert.equal(isRecognizedIssueOrEvent(issueWebhook()), true);
+  assert.equal(isRecognizedIssueOrEvent(legacyEventAlert), true);
+  // Header can also drive the decision (e.g., when payload shape is ambiguous).
+  assert.equal(
+    isRecognizedIssueOrEvent({}, new Headers({ 'Sentry-Hook-Resource': 'issue' })),
+    true,
+  );
+});
+
+test('isRecognizedIssueOrEvent: false for comment / metric_alert / unknown shapes', () => {
   // Comments and metric_alerts are documented Sentry shapes, but they don't
   // populate data.issue / data.event — the handler should route them to the
   // debug-message path so the user still sees the content in Slack.
