@@ -6,8 +6,11 @@ import {
   buildBlocks,
   buildSlackMessage,
   buildDebugMessage,
+  buildCommentMessage,
+  buildMetricAlertMessage,
   detectWebhookType,
-  isRecognizedIssueOrEvent,
+  FORMATTERS,
+  SILENT_WEBHOOK_TYPES,
   pickColor,
 } from '../api/edge.js';
 import {
@@ -15,6 +18,8 @@ import {
   SENTRY_LEVELS,
   SENTRY_PRIORITIES,
   SENTRY_SUBSTATUSES,
+  SENTRY_COMMENT_ACTIONS,
+  SENTRY_METRIC_ALERT_ACTIONS,
   issueWebhook,
   commentWebhook,
   metricAlertWebhook,
@@ -203,19 +208,6 @@ test('channel is passed through to chat.postMessage unchanged', () => {
 // a Block-Kit-valid message even if content is sparse.
 // ---------------------------------------------------------------------------
 
-test('comment webhook does not crash and produces a schema-valid Slack message', () => {
-  // Comments deliver only data.comment/comment_id/issue_id/project_slug —
-  // none of the issue fields are present. We just need to not blow up and to
-  // emit a valid Block Kit payload.
-  const msg = buildFromBody(commentWebhook);
-  assert.doesNotThrow(() => validateSlackMessage(msg));
-});
-
-test('metric_alert webhook does not crash and produces a schema-valid Slack message', () => {
-  const msg = buildFromBody(metricAlertWebhook);
-  assert.doesNotThrow(() => validateSlackMessage(msg));
-});
-
 test('empty body produces a schema-valid Slack message with safe defaults', () => {
   const msg = buildFromBody({});
   assert.doesNotThrow(() => validateSlackMessage(msg));
@@ -290,25 +282,137 @@ test('detectWebhookType prefers the documented Sentry-Hook-Resource header over 
   assert.equal(detectWebhookType(issueWebhook(), headers), 'installation');
 });
 
-test('isRecognizedIssueOrEvent: true for issue and event_alert types', () => {
-  assert.equal(isRecognizedIssueOrEvent(issueWebhook()), true);
-  assert.equal(isRecognizedIssueOrEvent(legacyEventAlert), true);
-  // Header can also drive the decision (e.g., when payload shape is ambiguous).
-  assert.equal(
-    isRecognizedIssueOrEvent({}, new Headers({ 'Sentry-Hook-Resource': 'issue' })),
-    true,
-  );
+test('FORMATTERS covers every documented Sentry resource we render', () => {
+  // Anything that lands here means we ship a real formatted Slack message for
+  // that resource type instead of the yellow debug-fallback bar.
+  assert.equal(typeof FORMATTERS.issue, 'function');
+  assert.equal(typeof FORMATTERS.event_alert, 'function');
+  assert.equal(typeof FORMATTERS.comment, 'function');
+  assert.equal(typeof FORMATTERS.metric_alert, 'function');
 });
 
-test('isRecognizedIssueOrEvent: false for comment / metric_alert / unknown shapes', () => {
-  // Comments and metric_alerts are documented Sentry shapes, but they don't
-  // populate data.issue / data.event — the handler should route them to the
-  // debug-message path so the user still sees the content in Slack.
-  assert.equal(isRecognizedIssueOrEvent(commentWebhook), false);
-  assert.equal(isRecognizedIssueOrEvent(metricAlertWebhook), false);
-  assert.equal(isRecognizedIssueOrEvent({}), false);
-  assert.equal(isRecognizedIssueOrEvent(null), false);
-  assert.equal(isRecognizedIssueOrEvent({ data: {} }), false);
+test('SILENT_WEBHOOK_TYPES includes installation (lifecycle event, not an alert)', () => {
+  // installation.created / installation.deleted are the integration's own
+  // install/uninstall events — they are routine and should not produce a
+  // Slack message.
+  assert.equal(SILENT_WEBHOOK_TYPES.has('installation'), true);
+});
+
+// ---------------------------------------------------------------------------
+// Comment webhook formatter
+// ---------------------------------------------------------------------------
+
+test('buildCommentMessage produces a schema-valid Slack message with the actor, action, and comment text', () => {
+  const msg = buildCommentMessage(CHANNEL, commentWebhook);
+  assert.doesNotThrow(() => validateSlackMessage(msg));
+
+  const header = msg.attachments[0].blocks[0].text.text;
+  // Documented actor.name from the fixture.
+  assert.match(header, /colleen/);
+  // Documented "created" action → "commented on".
+  assert.match(header, /commented on/);
+  // Documented issue_id from the fixture.
+  assert.match(header, /issue #100/);
+  // Documented project_slug from the fixture.
+  assert.match(header, /sentry/);
+
+  // The comment body itself is rendered (quoted in Slack mrkdwn).
+  const body = msg.attachments[0].blocks[1].text.text;
+  assert.match(body, /adding a comment/);
+});
+
+test('buildCommentMessage renders the documented timestamp via Slack <!date^…> token', () => {
+  const msg = buildCommentMessage(CHANNEL, commentWebhook);
+  const contextBlock = msg.attachments[0].blocks.find(b => b.type === 'context');
+  assert.ok(contextBlock, 'expected a context block with the timestamp');
+  assert.match(contextBlock.elements[0].text, SLACK_DATE_RE);
+});
+
+for (const action of SENTRY_COMMENT_ACTIONS) {
+  test(`comment webhook with action="${action}" → schema-valid Slack message`, () => {
+    const msg = buildCommentMessage(CHANNEL, { ...commentWebhook, action });
+    assert.doesNotThrow(() => validateSlackMessage(msg));
+    // Every documented action produces a header that names the actor.
+    const header = msg.attachments[0].blocks[0].text.text;
+    assert.match(header, /colleen/);
+  });
+}
+
+test('buildCommentMessage handles a comment payload missing optional fields', () => {
+  // Spec only guarantees `comment` and identifiers — actor/timestamp may be
+  // absent in malformed payloads. We must not crash.
+  const msg = buildCommentMessage(CHANNEL, { action: 'created', data: { comment: 'hi' } });
+  assert.doesNotThrow(() => validateSlackMessage(msg));
+});
+
+test('buildCommentMessage truncates very long comments to stay under the 3000-char section limit', () => {
+  const long = 'x'.repeat(5000);
+  const msg = buildCommentMessage(CHANNEL, {
+    action: 'created',
+    data: { comment: long, issue_id: 1, project_slug: 'p' },
+    actor: { name: 'colleen' },
+  });
+  assert.doesNotThrow(() => validateSlackMessage(msg));
+});
+
+// ---------------------------------------------------------------------------
+// Metric alert webhook formatter
+// ---------------------------------------------------------------------------
+
+test('buildMetricAlertMessage produces a schema-valid Slack message with title, body, and rule fields', () => {
+  const msg = buildMetricAlertMessage(CHANNEL, metricAlertWebhook);
+  assert.doesNotThrow(() => validateSlackMessage(msg));
+
+  // Documented description_title is the human-readable title.
+  const header = msg.attachments[0].blocks[0].text.text;
+  assert.match(header, /Resolved: Too many errors/);
+  // Documented web_url renders as a Slack mrkdwn link <url|label>.
+  assert.match(header, /<https:\/\/sentry\.io\/[^|]+\|/);
+
+  // description_text is rendered in the body section.
+  const body = msg.attachments[0].blocks[1].text.text;
+  assert.match(body, /1000 events in the last 10 minutes/);
+
+  // Documented alert_rule fields (aggregate, dataset, query) appear as Slack
+  // section fields when present.
+  const fieldsBlock = msg.attachments[0].blocks.find(b => b.type === 'section' && b.fields);
+  assert.ok(fieldsBlock, 'expected an alert-rule fields block');
+  const labels = fieldsBlock.fields.map(f => f.text.split(':')[0].replaceAll('*', ''));
+  assert.ok(labels.includes('Aggregate'));
+  assert.ok(labels.includes('Dataset'));
+  assert.ok(labels.includes('Query'));
+});
+
+test('metric_alert action="resolved" is rendered green with the documented verb', () => {
+  const msg = buildMetricAlertMessage(CHANNEL, { ...metricAlertWebhook, action: 'resolved' });
+  assert.equal(msg.attachments[0].color, '#2EB67D');
+  assert.match(msg.attachments[0].blocks[0].text.text, /Resolved:/);
+});
+
+test('metric_alert action="critical" is rendered red with the documented verb', () => {
+  const msg = buildMetricAlertMessage(CHANNEL, { ...metricAlertWebhook, action: 'critical' });
+  assert.equal(msg.attachments[0].color, '#E01E5A');
+  assert.match(msg.attachments[0].blocks[0].text.text, /Critical:/);
+});
+
+test('metric_alert action="warning" is rendered yellow with the documented verb', () => {
+  const msg = buildMetricAlertMessage(CHANNEL, { ...metricAlertWebhook, action: 'warning' });
+  assert.equal(msg.attachments[0].color, '#ECB22E');
+  assert.match(msg.attachments[0].blocks[0].text.text, /Warning:/);
+});
+
+for (const action of SENTRY_METRIC_ALERT_ACTIONS) {
+  test(`metric_alert with action="${action}" → schema-valid Slack message`, () => {
+    const msg = buildMetricAlertMessage(CHANNEL, { ...metricAlertWebhook, action });
+    assert.doesNotThrow(() => validateSlackMessage(msg));
+  });
+}
+
+test('buildMetricAlertMessage handles a metric_alert missing optional fields', () => {
+  // If Sentry sends only the required envelope, we still produce a valid
+  // Slack message — body/fields are omitted, not stubbed.
+  const msg = buildMetricAlertMessage(CHANNEL, { action: 'critical', data: { metric_alert: {} } });
+  assert.doesNotThrow(() => validateSlackMessage(msg));
 });
 
 test('buildDebugMessage produces a schema-valid Slack message for a comment webhook', () => {
