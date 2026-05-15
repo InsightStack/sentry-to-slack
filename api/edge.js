@@ -119,10 +119,15 @@ export const pickColor = (action, level) => {
   return LEVEL_COLOR[level] || LEVEL_COLOR.info;
 };
 
-const sendMessage = async (channel, payload) => {
+export const buildSlackMessage = (channel, payload) => {
   const blocks = buildBlocks(payload);
   const color = pickColor(payload.action, payload.level);
   const fallback = payload.title || 'Sentry alert';
+  return { channel, text: fallback, attachments: [{ color, blocks, fallback }] };
+};
+
+const sendMessage = async (channel, payload) => {
+  const body = buildSlackMessage(channel, payload);
 
   try {
     const response = await fetch('https://slack.com/api/chat.postMessage', {
@@ -131,11 +136,7 @@ const sendMessage = async (channel, payload) => {
         'Content-Type': 'application/json; charset=utf-8',
         'Authorization': `Bearer ${process.env.SLACK_ACCESS_TOKEN}`,
       },
-      body: JSON.stringify({
-        channel,
-        text: fallback,
-        attachments: [{ color, blocks, fallback }],
-      }),
+      body: JSON.stringify(body),
     });
 
     const data = await response.json();

@@ -3,7 +3,10 @@
 ## Unreleased
 
 ### Added
-- Test suite using Node's built-in `node:test` runner (no extra dependencies). Covers `parsePayload`, `pickColor`, and `buildBlocks` against integration-webhook, event-alert, and empty-body fixtures. Run with `npm test`.
+- Test suite using Node's built-in `node:test` runner (no extra dependencies). 38 tests run with `npm test`. Tests are anchored to documented specs rather than the implementation:
+  - **Sentry payload fixtures** in `test/fixtures/sentry.js` mirror the example payloads and enum values from Sentry's integration-platform webhook docs (issues, comments, metric alerts). Each enum (`SENTRY_ISSUE_ACTIONS`, `SENTRY_LEVELS`, `SENTRY_PRIORITIES`, `SENTRY_SUBSTATUSES`) is iterated in tests so adding a new documented value reveals whichever branch is missing.
+  - **Slack Block Kit validator** in `test/slack-schema.js` asserts the outgoing `chat.postMessage` payload against the published spec: block types, section text ≤ 3000 chars, section fields ≤ 10 items of ≤ 2000 chars, context elements ≤ 10, attachment color matches `good|warning|danger|#RRGGBB`, ≤ 50 blocks per message, and the `<!date^…>` token format. Every test runs its output through the validator.
+- Exported `buildSlackMessage(channel, payload)` from `api/edge.js` so tests can assert against the full outgoing payload (channel, text fallback, attachment color) rather than just the inner blocks.
 - Switched the package to ESM (`"type": "module"`) so the test runner can `import` from `api/edge.js`. The unused legacy CommonJS file `sendMessage.js` was renamed to `sendMessage.cjs` to keep it parseable.
 - Action-aware rendering for Sentry issue webhooks. Resolved, reopened, assigned, archived, and ignored events now get their own emoji, verb, and color instead of always rendering as a red error alert.
 - Colored attachment bar on every message. Color is derived from the action (green for resolved, gray for archived/ignored, etc.) or from the issue level (fatal/error/warning/info/debug) when no action is set.
