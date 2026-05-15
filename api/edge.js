@@ -164,11 +164,6 @@ export const buildDebugMessage = (channel, summary, body) => {
   };
 };
 
-// Webhook resource types we have a formatter for. Anything else (comment,
-// metric_alert, future shapes) flows through buildDebugMessage so the
-// content still lands in Slack, labeled with the detected type.
-export const RENDERABLE_WEBHOOK_TYPES = new Set(['issue', 'event_alert']);
-
 // Identifies the Sentry webhook resource type. Prefers the documented
 // `Sentry-Hook-Resource` header, falling back to payload-shape inference
 // for proxies, tests, or future versions that don't send it.
@@ -187,8 +182,113 @@ export const detectWebhookType = (body, headers) => {
   return 'unknown';
 };
 
-export const isRecognizedIssueOrEvent = (body, headers) =>
-  RENDERABLE_WEBHOOK_TYPES.has(detectWebhookType(body, headers));
+const COMMENT_VERB = {
+  created: 'commented on',
+  updated: 'edited a comment on',
+  deleted: 'deleted a comment on',
+};
+
+export const buildCommentMessage = (channel, body) => {
+  const d = body?.data || {};
+  const actor = body?.actor?.name || 'Someone';
+  const verb = COMMENT_VERB[body?.action] || 'commented on';
+  const issueRef = d.issue_id != null ? `issue #${d.issue_id}` : 'an issue';
+  const projectRef = d.project_slug ? ` in \`${d.project_slug}\`` : '';
+  const headerText = `:speech_balloon: ${actor} ${verb} ${issueRef}${projectRef}`;
+  const fallback = `${actor} ${verb} ${issueRef}`;
+
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: `*${headerText}*` } },
+  ];
+
+  if (typeof d.comment === 'string' && d.comment.length) {
+    const quoted = d.comment.split('\n').map(line => `> ${line}`).join('\n');
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: truncate(quoted, 2900) },
+    });
+  }
+
+  if (d.timestamp) {
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: slackDate(d.timestamp, d.timestamp) }],
+    });
+  }
+
+  return {
+    channel,
+    text: fallback,
+    attachments: [{ color: '#36C5F0', fallback, blocks }],
+  };
+};
+
+const METRIC_ALERT_STYLE = {
+  critical: { color: '#E01E5A', emoji: ':rotating_light:', verb: 'Critical' },
+  warning: { color: '#ECB22E', emoji: ':warning:', verb: 'Warning' },
+  resolved: { color: '#2EB67D', emoji: ':white_check_mark:', verb: 'Resolved' },
+};
+
+export const buildMetricAlertMessage = (channel, body) => {
+  const d = body?.data || {};
+  const ma = d.metric_alert || {};
+  const rule = ma.alert_rule || {};
+  const status = body?.action || ma.status || null;
+  const style = METRIC_ALERT_STYLE[status] || null;
+  const emoji = style?.emoji || ':bar_chart:';
+  const verb = style?.verb;
+  const color = style?.color || '#36C5F0';
+
+  const title = d.description_title || rule.name || 'Sentry metric alert';
+  const url = d.web_url || null;
+  const titleText = url ? `<${url}|${title}>` : title;
+  const headerText = verb ? `${emoji} ${verb}: ${titleText}` : `${emoji} ${titleText}`;
+
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: `*${headerText}*` } },
+  ];
+
+  if (d.description_text) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: truncate(d.description_text, 2900) },
+    });
+  }
+
+  const fields = [
+    { label: 'Aggregate', value: rule.aggregate },
+    { label: 'Dataset', value: rule.dataset },
+    { label: 'Query', value: rule.query ? `\`${rule.query}\`` : null },
+    { label: 'Status', value: ma.status },
+  ].filter(f => f.value);
+
+  if (fields.length) {
+    blocks.push({
+      type: 'section',
+      fields: fields.map(f => ({ type: 'mrkdwn', text: `*${f.label}:*\n${f.value}` })),
+    });
+  }
+
+  return {
+    channel,
+    text: title,
+    attachments: [{ color, fallback: title, blocks }],
+  };
+};
+
+// Webhook resource → builder. Anything not in this map and not in
+// SILENT_WEBHOOK_TYPES flows through buildDebugMessage so the raw payload
+// still lands in Slack, labeled with the detected type.
+export const FORMATTERS = {
+  issue: (channel, body) => buildSlackMessage(channel, parsePayload(body)),
+  event_alert: (channel, body) => buildSlackMessage(channel, parsePayload(body)),
+  comment: buildCommentMessage,
+  metric_alert: buildMetricAlertMessage,
+};
+
+// `installation` is the integration lifecycle (install / uninstall), not an
+// alert — it would just be noise in the alert channel.
+export const SILENT_WEBHOOK_TYPES = new Set(['installation']);
 
 const postToSlack = async (payload) => {
   try {
@@ -279,10 +379,15 @@ export default async (req) => {
 
   try {
     const hookType = detectWebhookType(body, req.headers);
-    if (!RENDERABLE_WEBHOOK_TYPES.has(hookType)) {
-      // Comment webhooks, metric_alert webhooks, brand-new payload shapes:
-      // surface them in Slack with the detected type so we know what
-      // formatter to add next.
+
+    if (SILENT_WEBHOOK_TYPES.has(hookType)) {
+      return new Response(`Webhook Processed ("${hookType}" silently ignored)`, { status: 200 });
+    }
+
+    const formatter = FORMATTERS[hookType];
+    if (!formatter) {
+      // Brand-new payload shapes: surface them in Slack with the detected
+      // type so we know what formatter to add next.
       await postToSlack(buildDebugMessage(
         channel,
         `Received Sentry "${hookType}" webhook — no formatter for this type yet`,
@@ -291,8 +396,7 @@ export default async (req) => {
       return new Response(`Webhook Processed (no formatter for "${hookType}")`, { status: 200 });
     }
 
-    const payload = parsePayload(body);
-    const message = buildSlackMessage(channel, payload);
+    const message = formatter(channel, body);
     const result = await postToSlack(message);
 
     // If Slack rejected the formatted message (e.g. invalid_blocks because a

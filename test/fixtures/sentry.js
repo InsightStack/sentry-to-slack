@@ -31,6 +31,12 @@ export const SENTRY_SUBSTATUSES = [
   'new',
 ];
 
+// "action: created | updated | deleted" — comments docs.
+export const SENTRY_COMMENT_ACTIONS = ['created', 'updated', 'deleted'];
+
+// "action: resolved | warning | critical" — metric-alerts docs.
+export const SENTRY_METRIC_ALERT_ACTIONS = ['resolved', 'warning', 'critical'];
+
 // Mirrors the issue object documented at the URL above. Override any field via
 // the `issue` key; override anything else via `top`.
 export const issueWebhook = ({ issue = {}, top = {} } = {}) => ({
