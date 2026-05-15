@@ -33,7 +33,10 @@ Here’s how you make sure Slack gets the error alerts:
 1. **Create a Slack App**: Visit [api.slack.com/apps](https://api.slack.com/apps) and create a new app in your workspace.
 2. **Permissions**: Under **OAuth & Permissions**, add the `chat:write` permission.
 3. **Install the App**: Grab the OAuth token after installing the app to your workspace.
-4. **Environment Variables**: Set `SLACK_ACCESS_TOKEN` and `CHANNEL_ID` as environment variables in Vercel.
+4. **Environment Variables**: Set the following in Vercel:
+   - `SLACK_ACCESS_TOKEN` — bot token from your Slack app's OAuth page.
+   - `CHANNEL_ID` — the Slack channel to post to.
+   - `SENTRY_CLIENT_SECRET` *(recommended)* — the **Client Secret** from your Sentry internal integration's settings page. When set, the function verifies the `Sentry-Hook-Signature` HMAC on every request and rejects anything that doesn't match. Leave unset to skip verification (useful for first-time setup, but anyone who knows your Vercel URL can post fake alerts).
 
 ### Step 4: Deploy the Function to Vercel
 

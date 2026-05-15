@@ -12,6 +12,7 @@ import {
   FORMATTERS,
   SILENT_WEBHOOK_TYPES,
   pickColor,
+  verifySentrySignature,
 } from '../api/edge.js';
 import {
   SENTRY_ISSUE_ACTIONS,
@@ -463,4 +464,73 @@ test('buildBlocks output by itself respects Block Kit limits', () => {
     attachments: [{ color: '#000000', blocks: buildBlocks(parsePayload(issueWebhook())) }],
   };
   assert.doesNotThrow(() => validateSlackMessage(msg));
+});
+
+// ---------------------------------------------------------------------------
+// HMAC signature verification (Sentry-Hook-Signature)
+//
+// Sentry's integration platform documents the header as a hex HMAC-SHA256 of
+// the raw request body, computed with the integration's client secret. We
+// compute the same digest here with the WebCrypto API and assert the verifier
+// behaves correctly across the valid / tampered / malformed / missing cases.
+// ---------------------------------------------------------------------------
+
+const sign = async (body, secret) => {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(body));
+  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
+};
+
+test('verifySentrySignature accepts a signature computed from the same body+secret', async () => {
+  const secret = 'integration-client-secret';
+  const body = JSON.stringify(issueWebhook());
+  const sig = await sign(body, secret);
+  assert.equal(await verifySentrySignature(body, sig, secret), true);
+});
+
+test('verifySentrySignature rejects a tampered body', async () => {
+  const secret = 'integration-client-secret';
+  const body = JSON.stringify(issueWebhook());
+  const sig = await sign(body, secret);
+  // Flip a single character — attacker modifies payload after signing.
+  const tampered = body.replace('"created"', '"resolved"');
+  assert.notEqual(tampered, body);
+  assert.equal(await verifySentrySignature(tampered, sig, secret), false);
+});
+
+test('verifySentrySignature rejects a signature made with the wrong secret', async () => {
+  const body = JSON.stringify(issueWebhook());
+  const sig = await sign(body, 'attacker-guess');
+  assert.equal(await verifySentrySignature(body, sig, 'real-secret'), false);
+});
+
+test('verifySentrySignature returns false for missing signature or missing secret', async () => {
+  const body = '{}';
+  assert.equal(await verifySentrySignature(body, null, 'secret'), false);
+  assert.equal(await verifySentrySignature(body, '', 'secret'), false);
+  assert.equal(await verifySentrySignature(body, 'abcd', null), false);
+  assert.equal(await verifySentrySignature(body, 'abcd', ''), false);
+});
+
+test('verifySentrySignature returns false for malformed hex (odd length, non-hex chars)', async () => {
+  const body = '{}';
+  const secret = 'secret';
+  // Odd length — can't be a valid hex digest.
+  assert.equal(await verifySentrySignature(body, 'abc', secret), false);
+  // Non-hex characters.
+  assert.equal(await verifySentrySignature(body, 'zzzz', secret), false);
+  // Empty string.
+  assert.equal(await verifySentrySignature(body, '', secret), false);
+});
+
+test('verifySentrySignature rejects a hex digest of the wrong length', async () => {
+  // SHA-256 is 32 bytes = 64 hex chars. A 30-byte digest can't possibly match.
+  const body = '{}';
+  const secret = 'secret';
+  const wrongLength = 'a'.repeat(60);
+  assert.equal(await verifySentrySignature(body, wrongLength, secret), false);
 });
